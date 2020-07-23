@@ -1143,8 +1143,6 @@ static void dwc3_prepare_trbs(struct dwc3_ep *dep)
 	}
 }
 
-static void dwc3_gadget_ep_cleanup_cancelled_requests(struct dwc3_ep *dep);
-
 static int __dwc3_gadget_kick_transfer(struct dwc3_ep *dep, u16 cmd_param)
 {
 	struct dwc3_gadget_ep_cmd_params params;
@@ -1176,20 +1174,15 @@ static int __dwc3_gadget_kick_transfer(struct dwc3_ep *dep, u16 cmd_param)
 
 	ret = dwc3_send_gadget_ep_cmd(dep, cmd, &params);
 	if (ret < 0) {
-		struct dwc3_request *tmp;
-
-		if (ret == -EAGAIN)
-			return ret;
-
-		dwc3_stop_active_transfer(dep, true, true);
-
-		list_for_each_entry_safe(req, tmp, &dep->started_list, list)
-			dwc3_gadget_move_cancelled_request(req);
-
-		/* If ep isn't started, then there's no end transfer pending */
-		if (!(dep->flags & DWC3_EP_END_TRANSFER_PENDING))
-			dwc3_gadget_ep_cleanup_cancelled_requests(dep);
-
+		/*
+		 * FIXME we need to iterate over the list of requests
+		 * here and stop, unmap, free and del each of the linked
+		 * requests instead of what we do now.
+		 */
+		if (req->trb)
+			memset(req->trb, 0, sizeof(struct dwc3_trb));
+		dep->queued_requests--;
+		dwc3_gadget_del_and_unmap_request(dep, req, ret);
 		return ret;
 	}
 
@@ -1453,8 +1446,6 @@ int __dwc3_gadget_ep_set_halt(struct dwc3_ep *dep, int value, int protocol)
 {
 	struct dwc3_gadget_ep_cmd_params	params;
 	struct dwc3				*dwc = dep->dwc;
-	struct dwc3_request			*req;
-	struct dwc3_request			*tmp;
 	int					ret;
 
 	if (usb_endpoint_xfer_isoc(dep->endpoint.desc)) {
@@ -1491,37 +1482,13 @@ int __dwc3_gadget_ep_set_halt(struct dwc3_ep *dep, int value, int protocol)
 		else
 			dep->flags |= DWC3_EP_STALL;
 	} else {
-		/*
-		 * Don't issue CLEAR_STALL command to control endpoints. The
-		 * controller automatically clears the STALL when it receives
-		 * the SETUP token.
-		 */
-		if (dep->number <= 1) {
-			dep->flags &= ~(DWC3_EP_STALL | DWC3_EP_WEDGE);
-			return 0;
-		}
 
 		ret = dwc3_send_clear_stall_ep_cmd(dep);
-		if (ret) {
+		if (ret)
 			dev_err(dwc->dev, "failed to clear STALL on %s\n",
 					dep->name);
-			return 0;
-		}
-
-		dep->flags &= ~(DWC3_EP_STALL | DWC3_EP_WEDGE);
-
-		dwc3_stop_active_transfer(dep, true, true);
-
-		list_for_each_entry_safe(req, tmp, &dep->started_list, list)
-			dwc3_gadget_move_cancelled_request(req);
-
-		list_for_each_entry_safe(req, tmp, &dep->pending_list, list)
-			dwc3_gadget_move_cancelled_request(req);
-
-		if (!(dep->flags & DWC3_EP_END_TRANSFER_PENDING)) {
-			dep->flags &= ~DWC3_EP_DELAY_START;
-			dwc3_gadget_ep_cleanup_cancelled_requests(dep);
-		}
+		else
+			dep->flags &= ~(DWC3_EP_STALL | DWC3_EP_WEDGE);
 	}
 
 	return ret;
@@ -1609,10 +1576,6 @@ static int __dwc3_gadget_wakeup(struct dwc3 *dwc)
 	u32			reg;
 
 	u8			link_state;
-
-	/* If req->trb is not set, then the request has not started */
-	if (!req->trb)
-		return;
 
 	/*
 	 * According to the Databook Remote wakeup request should
@@ -2144,6 +2107,7 @@ static int dwc3_gadget_init_endpoints(struct dwc3 *dwc, u8 num)
 
 		INIT_LIST_HEAD(&dep->pending_list);
 		INIT_LIST_HEAD(&dep->started_list);
+		INIT_LIST_HEAD(&dep->cancelled_list);
 	}
 
 	return 0;
