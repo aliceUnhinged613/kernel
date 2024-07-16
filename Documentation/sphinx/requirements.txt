@@ -1,3 +1,4 @@
 docutils
 Sphinx==2.4.4
 sphinx_rtd_theme
+setuptools>=70.0.0 # not directly required, pinned by Snyk to avoid a vulnerability
